@@ -8,12 +8,12 @@ import (
 func test(name string, t *testing.T) {
 	zip := fmt.Sprintf("testfiles/%s.zip", name)
 	outfile := fmt.Sprintf("/tmp/%s.pdf", name)
-	options := PdfGeneratorOptions{AddPageNumbers: true, AllPages: false, AnnotationsOnly: false}
+	options := PdfGeneratorOptions{AddPageNumbers: true, AllPages: true, AnnotationsOnly: false}
 	generator := CreatePdfGenerator(zip, outfile, options)
 	err := generator.Generate()
 
 	if err != nil {
-		t.Error(err)
+		t.Error(err, name)
 	}
 }
 func TestGenerateA3(t *testing.T) {
@@ -37,4 +37,8 @@ func TestGenerateTmpl(t *testing.T) {
 }
 func TestGenerateStrangeBug(t *testing.T) {
 	test("strange", t)
+}
+
+func TestHighlights(t *testing.T) {
+	test("highlights", t)
 }

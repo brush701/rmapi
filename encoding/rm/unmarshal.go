@@ -27,13 +27,13 @@ func (rm *Rm) UnmarshalBinary(data []byte) error {
 			return err
 		}
 
-		rm.Layers[i].Lines = make([]Line, nbLines)
+		rm.Layers[i].Strokes = make([]Stroke, nbLines)
 		for j := uint32(0); j < nbLines; j++ {
-			line, err := r.readLine()
+			line, err := r.readStroke()
 			if err != nil {
 				return err
 			}
-			rm.Layers[i].Lines[j] = line
+			rm.Layers[i].Strokes[j] = line
 		}
 	}
 
@@ -85,8 +85,8 @@ func (r *reader) readNumber() (uint32, error) {
 	return nb, nil
 }
 
-func (r *reader) readLine() (Line, error) {
-	var line Line
+func (r *reader) readStroke() (Stroke, error) {
+	var line Stroke
 
 	if err := binary.Read(r, binary.LittleEndian, &line.BrushType); err != nil {
 		return line, fmt.Errorf("Failed to read line")
@@ -96,7 +96,7 @@ func (r *reader) readLine() (Line, error) {
 		return line, fmt.Errorf("Failed to read line")
 	}
 
-	if err := binary.Read(r, binary.LittleEndian, &line.Padding); err != nil {
+	if err := binary.Read(r, binary.LittleEndian, &line.Unknown); err != nil {
 		return line, fmt.Errorf("Failed to read line")
 	}
 
@@ -120,22 +120,22 @@ func (r *reader) readLine() (Line, error) {
 		return line, nil
 	}
 
-	line.Points = make([]Point, nbPoints)
+	line.Segments = make([]Segment, nbPoints)
 
 	for i := uint32(0); i < nbPoints; i++ {
-		p, err := r.readPoint()
+		p, err := r.readSegment()
 		if err != nil {
 			return line, err
 		}
 
-		line.Points[i] = p
+		line.Segments[i] = p
 	}
 
 	return line, nil
 }
 
-func (r *reader) readPoint() (Point, error) {
-	var point Point
+func (r *reader) readSegment() (Segment, error) {
+	var point Segment
 
 	if err := binary.Read(r, binary.LittleEndian, &point.X); err != nil {
 		return point, fmt.Errorf("Failed to read point")

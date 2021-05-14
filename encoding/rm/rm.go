@@ -77,24 +77,24 @@ type BrushType uint32
 
 // Mappings for brush types.
 const (
-	BallPoint   BrushType = 2
-	Marker      BrushType = 3
-	Fineliner   BrushType = 4
-	SharpPencil BrushType = 7
-	TiltPencil  BrushType = 1
-	Brush       BrushType = 0
-	Highlighter BrushType = 5
-	Eraser      BrushType = 6
-	EraseArea   BrushType = 8
+	Brush            BrushType = 0
+	Pencil           BrushType = 1
+	BallPoint        BrushType = 2
+	Marker           BrushType = 3
+	Fineliner        BrushType = 4
+	Highlighter      BrushType = 5
+	Eraser           BrushType = 6
+	MechanicalPencil BrushType = 7
+	EraseArea        BrushType = 8
 
 	// v5 brings new brush type IDs
-	BallPointV5   BrushType = 15
-	MarkerV5      BrushType = 16
-	FinelinerV5   BrushType = 17
-	SharpPencilV5 BrushType = 13
-	TiltPencilV5  BrushType = 14
-	BrushV5       BrushType = 12
-	HighlighterV5 BrushType = 18
+	BrushV5            BrushType = 12
+	MechanicalPencilV5 BrushType = 13
+	PencilV5           BrushType = 14
+	BallPointV5        BrushType = 15
+	MarkerV5           BrushType = 16
+	FinelinerV5        BrushType = 17
+	HighlighterV5      BrushType = 18
 )
 
 // BrushSize represents the base brush sizes.
@@ -116,21 +116,21 @@ type Rm struct {
 
 // A Layer contains lines.
 type Layer struct {
-	Lines []Line
+	Strokes []Stroke
 }
 
-// A Line is composed of points.
-type Line struct {
+// A Stroke is composed of points.
+type Stroke struct {
 	BrushType  BrushType
 	BrushColor BrushColor
-	Padding    uint32
 	Unknown    float32
+	Width      uint32
 	BrushSize  BrushSize
-	Points     []Point
+	Segments   []Segment
 }
 
-// A Point has coordinates.
-type Point struct {
+// A Segment has coordinates.
+type Segment struct {
 	X         float32
 	Y         float32
 	Speed     float32
@@ -158,15 +158,15 @@ func (rm Rm) String() string {
 	fmt.Fprintf(&o, "no of layers: %d\n", len(rm.Layers))
 	for i, layer := range rm.Layers {
 		fmt.Fprintf(&o, "layer %d\n", i)
-		fmt.Fprintf(&o, "  nb of lines: %d\n", len(layer.Lines))
-		for j, line := range layer.Lines {
+		fmt.Fprintf(&o, "  nb of lines: %d\n", len(layer.Strokes))
+		for j, line := range layer.Strokes {
 			fmt.Fprintf(&o, "  line %d\n", j)
 			fmt.Fprintf(&o, "    brush type: %d\n", line.BrushType)
 			fmt.Fprintf(&o, "    brush color: %d\n", line.BrushColor)
-			fmt.Fprintf(&o, "    padding: %d\n", line.Padding)
+			fmt.Fprintf(&o, "    padding: %d\n", line.Width)
 			fmt.Fprintf(&o, "    brush size: %f\n", line.BrushSize)
-			fmt.Fprintf(&o, "    nb of points: %d\n", len(line.Points))
-			for k, point := range line.Points {
+			fmt.Fprintf(&o, "    nb of points: %d\n", len(line.Segments))
+			for k, point := range line.Segments {
 				fmt.Fprintf(&o, "    point %d\n", k)
 				fmt.Fprintf(&o, "      coords: %f, %f\n", point.X, point.Y)
 				fmt.Fprintf(&o, "      speed: %f\n", point.Speed)

@@ -44,6 +44,10 @@ func (z *Zip) Read(r io.ReaderAt, size int64) error {
 		return err
 	}
 
+	if err := z.readHighlights(zr); err != nil {
+		return err
+	}
+
 	if err := z.readPagedata(zr); err != nil {
 		return err
 	}
@@ -234,6 +238,10 @@ func (z *Zip) readMetadata(zr *zip.Reader) error {
 	for _, file := range files {
 		name, _ := splitExt(file.FileInfo().Name())
 
+		if !strings.Contains(name, "metadata") {
+			continue
+		}
+
 		// name is 0-metadata.json
 		idx, err := strconv.Atoi(strings.Split(name, "-")[0])
 		if err != nil {
@@ -257,6 +265,46 @@ func (z *Zip) readMetadata(zr *zip.Reader) error {
 		err = json.Unmarshal(bytes, &z.Pages[idx].Metadata)
 		if err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// readHighlights extracts existing .json highlights files from an archive.
+func (z *Zip) readHighlights(zr *zip.Reader) error {
+	files, err := zipExtFinder(zr, ".json")
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		name, _ := splitExt(file.FileHeader.Name)
+
+		dir := filepath.Dir(file.FileHeader.Name)
+
+		if !strings.Contains(dir, "highlights") {
+			continue
+		}
+
+		// name is pageID.json
+		for idx, p := range z.Content.Pages {
+			if strings.Contains(name, p) {
+				r, err := file.Open()
+				if err != nil {
+					return err
+				}
+
+				bytes, err := ioutil.ReadAll(r)
+				if err != nil {
+					return err
+				}
+
+				err = json.Unmarshal(bytes, &z.Pages[idx].Highlights)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 

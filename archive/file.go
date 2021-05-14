@@ -72,6 +72,8 @@ type Page struct {
 	Thumbnail []byte
 	// Pagedata contains the name of the selected background template
 	Pagedata string
+	// Highlights is a json file containing information about highlights
+	Highlights HighlightsData
 }
 
 // Metadata represents the structure of a .metadata json file associated to a page.
@@ -103,6 +105,21 @@ type Content struct {
 	TextScale int      `json:"textScale"`
 
 	Transform Transform `json:"transform"`
+}
+
+// HighlightsData represents the structure of a highlights json file.
+type HighlightsData struct {
+	LayerHighlights [][]struct {
+		Length int `json:"length"`
+		Rects  []struct {
+			Height float32 `json:"height"`
+			Width  float32 `json:"width"`
+			X      float32 `json:"x"`
+			Y      float32 `json:"y"`
+		} `json:"rects"`
+		Start int    `json:"start"`
+		Text  string `json:"text"`
+	} `json:"highlights"`
 }
 
 // ExtraMetadata is a struct contained into a Content struct.

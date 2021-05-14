@@ -7,6 +7,7 @@
 // 384327f5-133e-49c8-82ff-30aa19f3cfa4//0.rm
 // 384327f5-133e-49c8-82ff-30aa19f3cfa4.pagedata
 // 384327f5-133e-49c8-82ff-30aa19f3cfa4.thumbnails/0.jpg
+// 384327f5-133e-49c8-82ff-30aa19f3cfa4.highlights//989bdc6c-7e9c-4795-84db-869a77c3beaf.json
 //
 // As the .zip file from remarkable is simply a normal .zip file
 // containing specific file formats, this package is a helper to

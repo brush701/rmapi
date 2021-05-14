@@ -32,8 +32,8 @@ func testUnmarshalBinary(t *testing.T, fn string, ver Version) *Rm {
 func TestUnmarshalBinaryV5(t *testing.T) {
 	rm := testUnmarshalBinary(t, "test_v5.rm", V5)
 	for _, layer := range rm.Layers {
-		for _, line := range layer.Lines {
-			if line.BrushSize != 2.0 {
+		for _, stroke := range layer.Strokes {
+			if stroke.BrushSize != 2.0 {
 				t.Error("Incorrectly parsing BrushSize")
 			}
 		}

@@ -3,33 +3,32 @@ package annotations
 import (
 	"bytes"
 	"errors"
-	"fmt"
+	"image/color"
+	"io"
+	"math"
+	"strconv"
 
 	"os"
 
 	"github.com/juruen/rmapi/archive"
 	"github.com/juruen/rmapi/encoding/rm"
-	"github.com/juruen/rmapi/log"
-	"github.com/unidoc/unipdf/v3/annotator"
-	"github.com/unidoc/unipdf/v3/contentstream"
-	"github.com/unidoc/unipdf/v3/contentstream/draw"
-	"github.com/unidoc/unipdf/v3/core"
-	"github.com/unidoc/unipdf/v3/creator"
-	pdf "github.com/unidoc/unipdf/v3/model"
+	"github.com/phpdave/gofpdf"
+	"github.com/phpdave/gofpdf/contrib/gofpdi"
 )
 
 const (
-	DeviceWidth  = 1404
-	DeviceHeight = 1872
+	DeviceWidth  = 1404.0
+	DeviceHeight = 1872.0
+	DPI          = 226.0
+	PtPerPx      = 72.0 / DPI //PDF standard says 1 pt = 1/72 in
 )
 
-var rmPageSize = creator.PageSize{445, 594}
+var rmPageSize = gofpdf.SizeType{Wd: DeviceWidth * PtPerPx, Ht: DeviceHeight * PtPerPx} //gopdf.Rect{445, 594}
 
 type PdfGenerator struct {
 	zipName        string
 	outputFilePath string
 	options        PdfGeneratorOptions
-	pdfReader      *pdf.PdfReader
 	template       bool
 }
 
@@ -39,12 +38,154 @@ type PdfGeneratorOptions struct {
 	AnnotationsOnly bool //export the annotations without the background/pdf
 }
 
-func CreatePdfGenerator(zipName, outputFilePath string, options PdfGeneratorOptions) *PdfGenerator {
-	return &PdfGenerator{zipName: zipName, outputFilePath: outputFilePath, options: options}
+var (
+	Black  = color.Black
+	White  = color.White
+	Grey   = color.Gray16{0x8000}
+	Yellow = color.RGBA{R: 255, G: 240, B: 102, A: 77}
+)
+
+var CMap = map[rm.BrushColor]color.Color{
+	rm.Black: Black,
+	rm.Grey:  Grey,
+	rm.White: White,
 }
 
-func normalized(p1 rm.Point, ratioX float64) (float64, float64) {
-	return float64(p1.X) * ratioX, float64(p1.Y) * ratioX
+type Highlight struct {
+	Contents   string
+	Rect       []float32
+	QuadPoints []float32
+	Color      []float32
+	Opacity    float32
+	Author     string
+}
+
+func _scaleColors(r uint32, g uint32, b uint32, pressure float32) (int, int, int) {
+	scaler := uint32(pressure * 100)
+	rscaled := int(255 - (255-r*0xff/0xffff)*scaler/100)
+	gscaled := int(255 - (255-g*0xff/0xffff)*scaler/100)
+	bscaled := int(255 - (255-b*0xff/0xffff)*scaler/100)
+
+	return rscaled, gscaled, bscaled
+}
+
+func transformAnnots(annots []Highlight, scale float32, pageHeight float32) []Highlight {
+
+	xformed := make([]Highlight, len(annots))
+	for i, note := range annots {
+		var qp QuadPoints
+		for i := 0; i < len(note.QuadPoints)-1; i += 2 {
+			qp.Points = append(qp.Points, Point{note.QuadPoints[i] * PtPerPx * scale, pageHeight - note.QuadPoints[i+1]*PtPerPx*scale})
+		}
+
+		rect := Rect{LL: Point{note.Rect[0] * PtPerPx * scale, float32(pageHeight) - note.Rect[1]*PtPerPx*scale},
+			UR: Point{note.Rect[2] * PtPerPx * scale, float32(pageHeight) - note.Rect[3]*PtPerPx*scale}}
+
+		xformed[i] = Highlight{
+			Contents:   note.Contents,
+			Rect:       rect.ToList(),
+			QuadPoints: qp.ToList(),
+			Color:      note.Color,
+			Opacity:    note.Opacity,
+			Author:     note.Author,
+		}
+	}
+	return xformed
+}
+
+func PaintStroke(stroke rm.Stroke, pdf *gofpdf.Fpdf, highlights *[]Highlight) error {
+	// Beware! Here lie magic numbers aplenty. Based on RMRL
+	// and hand tuned to get more-or-less correct appearance
+	r, g, b, _ := CMap[stroke.BrushColor].RGBA()
+
+	if stroke.BrushType == rm.Highlighter || stroke.BrushType == rm.HighlighterV5 {
+		var rect Rect
+		for i, segment := range stroke.Segments {
+			if i == 0 {
+				rect = Rect{LL: Point{X: segment.X - segment.Width/2, Y: segment.Y - segment.Width/2},
+					UR: Point{X: segment.X + segment.Width/2, Y: segment.Y + segment.Width/2}}
+			} else {
+				newRect := Rect{LL: Point{X: segment.X - segment.Width/2, Y: segment.Y - segment.Width/2},
+					UR: Point{X: segment.X + segment.Width/2, Y: segment.Y + segment.Width/2}}
+				rect = rect.Union(newRect)
+			}
+		}
+
+		qp := rect.ToQuadPoints()
+
+		*highlights = append(*highlights, Highlight{
+			Rect:       rect.ToList(),
+			QuadPoints: qp.ToList(),
+			Color:      []float32{float32(Yellow.R) / 255, float32(Yellow.G) / 255, float32(Yellow.B) / 255},
+			Opacity:    float32(Yellow.A) / 255,
+			Author:     "reMarkable",
+		})
+
+		return nil
+	} else {
+		pdf.SetLineCapStyle("round")
+		pdf.SetLineJoinStyle("round")
+		pdf.SetAlpha(1.0, "Normal")
+	}
+	for idx, segment := range stroke.Segments {
+		if idx == 0 {
+			pdf.MoveTo(float64(segment.X)*PtPerPx, float64(segment.Y)*PtPerPx)
+			continue
+		}
+		prev := stroke.Segments[idx-1]
+
+		var width float64
+		switch stroke.BrushType {
+		case rm.MechanicalPencil, rm.MechanicalPencilV5:
+			pdf.SetDrawColor(_scaleColors(r, g, b, segment.Pressure))
+			width = float64(segment.Width) * 1.5
+
+		case rm.Pencil, rm.PencilV5:
+			pdf.SetDrawColor(_scaleColors(r, g, b, segment.Pressure))
+			width = float64(segment.Width) * 0.58
+
+		case rm.Brush, rm.BrushV5:
+			// Set the width
+			modwidth := segment.Width * 0.75
+			maxdelta := modwidth * 0.75
+			delta := (segment.Pressure - 1) * maxdelta
+			width := float64(modwidth + delta)
+
+			press_mod := segment.Pressure * (1 - (segment.Speed / 150))
+			pdf.SetDrawColor(_scaleColors(r, g, b, press_mod))
+
+			distance := math.Sqrt(math.Pow(float64(segment.X-prev.X), 2) + math.Pow(float64(segment.Y-prev.Y), 2))
+			if distance < width {
+				pdf.SetLineCapStyle("round") // Rounded
+			} else {
+				pdf.SetLineCapStyle("square") // Flat
+			}
+
+		case rm.Marker, rm.MarkerV5:
+			width = float64(segment.Width)
+
+		case rm.BallPoint, rm.BallPointV5:
+			maxdelta := segment.Width / 2
+			delta := (segment.Pressure - 1) * maxdelta
+			width = float64(segment.Width + delta)
+
+		case rm.EraseArea, rm.Eraser:
+			continue
+
+		default:
+			width = float64(segment.Width)
+			pdf.SetDrawColor(_scaleColors(r, g, b, 1.0))
+		}
+
+		pdf.SetLineWidth(width / 2)
+		pdf.LineTo(float64(segment.X)*PtPerPx, float64(segment.Y)*PtPerPx)
+	}
+	pdf.DrawPath("S")
+	return nil
+}
+
+func CreatePdfGenerator(zipName, outputFilePath string, options PdfGeneratorOptions) *PdfGenerator {
+	return &PdfGenerator{zipName: zipName, outputFilePath: outputFilePath, options: options}
 }
 
 func (p *PdfGenerator) Generate() error {
@@ -52,7 +193,8 @@ func (p *PdfGenerator) Generate() error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
+
+	defer file.Close()
 
 	zip := archive.NewZip()
 
@@ -70,186 +212,194 @@ func (p *PdfGenerator) Generate() error {
 		return errors.New("only pdf and notebooks supported")
 	}
 
-	if err = p.initBackgroundPages(zip.Payload); err != nil {
-		return err
-	}
-
 	if len(zip.Pages) == 0 {
 		return errors.New("the document has no pages")
 	}
 
-	c := creator.New()
-	if p.template {
-		// use the standard page size
-		c.SetPageSize(rmPageSize)
+	pdf := gofpdf.NewCustom(&gofpdf.InitType{
+		UnitStr: "pt",
+		Size:    rmPageSize,
+	})
+
+	// TODO: outlines
+	/*
+		if p.pdfReader != nil && p.options.AllPages {
+			p.pdfReader.AddOutline()
+			outlines := p.pdfReader.GetOutlineTree()
+			c.SetOutlineTree(outlines)
+		}
+	*/
+	pdf.OpenLayerPane()
+	var seeker io.ReadSeeker
+
+	layers := make([]int, 2)
+	layers[0] = pdf.AddLayer("Background", true)
+	layers[1] = pdf.AddLayer("Layer 1", true)
+
+	annotations := make([][]Highlight, 0, 2)
+
+	if zip.Content.FileType == "pdf" && zip.Payload != nil {
+		seeker = io.ReadSeeker(bytes.NewReader(zip.Payload))
 	}
 
-	if p.pdfReader != nil && p.options.AllPages {
-		outlines := p.pdfReader.GetOutlineTree()
-		c.SetOutlineTree(outlines)
-	}
-
-	for i, pageAnnotations := range zip.Pages {
-		hasContent := pageAnnotations.Data != nil
+	for i, page := range zip.Pages {
+		hasContent := page.Data != nil
 
 		// do not add a page when there are no annotations
 		if !p.options.AllPages && !hasContent {
 			continue
 		}
 
-		page, err := p.addBackgroundPage(c, i+1)
-		if err != nil {
-			return err
+		scale := float64(100)
+		newHeight := float64(rmPageSize.Ht)
+		newWidth := float64(rmPageSize.Wd)
+		if zip.Content.FileType == "pdf" && zip.Payload != nil && seeker != nil {
+			tpl1 := gofpdi.ImportPageFromStream(pdf, &seeker, i+1, "/MediaBox")
+			sizes := gofpdi.GetPageSizes()
+			w := sizes[i+1]["/MediaBox"]["w"]
+			h := sizes[i+1]["/MediaBox"]["h"]
+			var orientation string
+			if w > h {
+				orientation = "L"
+			} else {
+				orientation = "P"
+			}
+
+			// Need to resize the page so that it has the same aspect ratio as the reMarkable
+			pdfRatio := w / h
+			rmRatio := rmPageSize.Wd / rmPageSize.Ht
+
+			if pdfRatio <= rmRatio {
+				newWidth = rmRatio * h
+				newHeight = h
+				scale = h / rmPageSize.Ht * 100
+			} else {
+				newHeight = w / rmRatio
+				newWidth = w
+				scale = w / rmPageSize.Wd * 100
+			}
+
+			pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: newWidth, Ht: newHeight})
+			pdf.BeginLayer(layers[0])
+			gofpdi.UseImportedTemplate(pdf, tpl1, 0, 0, w, h)
+			pdf.EndLayer()
+		} else { // No underlying PDF
+			pdf.AddPage()
+			scale = 100
 		}
 
-		ratio := c.Height() / c.Width()
-
-		var scale float64
-		if ratio < 1.33 {
-			scale = c.Width() / DeviceWidth
-		} else {
-			scale = c.Height() / DeviceHeight
-		}
-		if page == nil {
-			log.Error.Fatal("page is null")
-		}
-
-		if err != nil {
-			return err
-		}
 		if !hasContent {
 			continue
 		}
 
-		contentCreator := contentstream.NewContentCreator()
-		contentCreator.Add_q()
+		for idx, layer := range page.Data.Layers {
+			if idx+1 >= len(layers) {
+				layers = append(layers, pdf.AddLayer("Layer "+strconv.Itoa(idx), true))
+			}
+			annotations = append(annotations, make([]Highlight, 0))
 
-		for _, layer := range pageAnnotations.Data.Layers {
-			for _, line := range layer.Lines {
-				if len(line.Points) < 1 {
+			pdf.BeginLayer(layers[idx+1]) // layer 0 is background, idx is also zero based
+			pdf.TransformBegin()
+			pdf.TransformScaleXY(scale, 0, 0)
+			for _, stroke := range layer.Strokes {
+
+				if len(stroke.Segments) < 1 {
 					continue
 				}
-				if line.BrushType == rm.Eraser {
+
+				err = PaintStroke(stroke, pdf, &annotations[idx])
+				if err != nil {
 					continue
 				}
 
-				if line.BrushType == rm.HighlighterV5 {
-					last := len(line.Points) - 1
-					x1, y1 := normalized(line.Points[0], scale)
-					x2, _ := normalized(line.Points[last], scale)
-					// make horizontal lines only, use y1
-					width := scale * 30
-					y1 += width / 2
+				// Handle new highlights format from v2.7+
+				if len(page.Highlights.LayerHighlights) > idx { //might be an off-by-one here, not sure if layers in the .highlights file are zero indexed?
+					if len(page.Highlights.LayerHighlights[idx]) > 0 {
+						var note Highlight
+						cursor := -1
 
-					lineDef := annotator.LineAnnotationDef{X1: x1 - 1, Y1: c.Height() - y1, X2: x2, Y2: c.Height() - y1}
-					lineDef.LineColor = pdf.NewPdfColorDeviceRGB(1.0, 1.0, 0.0) //yellow
-					lineDef.Opacity = 0.5
-					lineDef.LineWidth = width
-					ann, err := annotator.CreateLineAnnotation(lineDef)
-					if err != nil {
-						return err
+						for n, h := range page.Highlights.LayerHighlights[idx] {
+							// Need to find the bounding box for each highlight
+							// and build the list of QuadPoints
+							qp := make([]float32, 0, 4)
+
+							var rect Rect
+							for i, r := range h.Rects { // There could in theory be multiple, though it appears there is only 1 right now
+								ll := Point{X: r.X, Y: r.Y}
+								ur := Point{X: r.X + r.Width, Y: r.Y + r.Height}
+								if i == 0 {
+									rect = Rect{LL: ll, UR: ur}
+								} else {
+									rect = rect.Union(Rect{LL: ll, UR: ur})
+								}
+
+								// Transform doesn't get applied to the Annotations, so we need to apply scale manually. Also for whatever reason
+								// Annotations seem to have a different coordinate system than lines? It's inverted wrt the PDF spec, so we
+								// flip them here
+								qp = append(qp,
+									r.X, r.Y+r.Height,
+									r.X+r.Width, r.Y+r.Height,
+									r.X, r.Y,
+									r.X+r.Width, r.Y)
+							}
+
+							highlight := Highlight{
+								Rect:       rect.ToList(),
+								QuadPoints: qp,
+								Color:      []float32{float32(Yellow.R) / 255, float32(Yellow.G) / 255, float32(Yellow.B) / 255},
+								Opacity:    float32(Yellow.A) / 255,
+								Author:     "reMarkable",
+							}
+
+							if cursor > 0 && h.Start-cursor > 10 {
+								annotations[idx] = append(annotations[idx], note)
+								note = highlight
+							} else {
+								if n == 0 {
+									note = highlight
+								} else {
+									note = note.Union(highlight)
+								}
+							}
+
+							cursor = h.Start + h.Length
+						}
+
 					}
-					page.AddAnnotation(ann)
-				} else {
-					path := draw.NewPath()
-					for i := 0; i < len(line.Points); i++ {
-						x1, y1 := normalized(line.Points[i], scale)
-						path = path.AppendPoint(draw.NewPoint(x1, c.Height()-y1))
-					}
-
-					contentCreator.Add_w(float64(line.BrushSize / 100))
-
-					switch line.BrushColor {
-					case rm.Black:
-						contentCreator.Add_rg(1.0, 1.0, 1.0)
-					case rm.White:
-						contentCreator.Add_rg(0.0, 0.0, 0.0)
-					case rm.Grey:
-						contentCreator.Add_rg(0.8, 0.8, 0.8)
-					}
-
-					//TODO: use bezier
-					draw.DrawPathWithCreator(path, contentCreator)
-
-					contentCreator.Add_S()
 				}
 			}
-		}
-		contentCreator.Add_Q()
-		drawingOperations := contentCreator.Operations().String()
-		pageContentStreams, err := page.GetAllContentStreams()
-		//hack: wrap the page content in a context to prevent transformation matrix misalignment
-		wrapper := []string{"q", pageContentStreams, "Q", drawingOperations}
-		page.SetContentStreams(wrapper, core.NewFlateEncoder())
-	}
 
-	return c.WriteToFile(p.outputFilePath)
-}
-
-func (p *PdfGenerator) initBackgroundPages(pdfArr []byte) error {
-	if len(pdfArr) > 0 {
-		pdfReader, err := pdf.NewPdfReader(bytes.NewReader(pdfArr))
-		if err != nil {
-			return err
-		}
-
-		encrypted, err := pdfReader.IsEncrypted()
-		if err != nil {
-			return nil
-		}
-		if encrypted {
-			valid, err := pdfReader.Decrypt([]byte(""))
-			if err != nil {
-				return err
-			}
-			if !valid {
-				return fmt.Errorf("cannot decrypt")
+			grouped := groupHighlights(annotations[idx])
+			xformed := transformAnnots(grouped, float32(scale/100), float32(newHeight))
+			for _, annot := range xformed {
+				pdf.AddHighlightAnnotation(gofpdf.Highlight(annot))
 			}
 
+			pdf.TransformEnd()
+			pdf.EndLayer()
 		}
-
-		p.pdfReader = pdfReader
-		p.template = false
-		return nil
 	}
 
-	p.template = true
-	return nil
+	return pdf.OutputFileAndClose(p.outputFilePath)
 }
 
-func (p *PdfGenerator) addBackgroundPage(c *creator.Creator, pageNum int) (*pdf.PdfPage, error) {
-	var page *pdf.PdfPage
+func groupHighlights(list []Highlight) []Highlight {
+	groupedStrokes := make([]Highlight, 0, len(list))
 
-	if !p.template && !p.options.AnnotationsOnly {
-		tmpPage, err := p.pdfReader.GetPage(pageNum)
-		if err != nil {
-			return nil, err
+outer:
+	for _, h := range list {
+		for j, b := range groupedStrokes {
+			if h.Intersects(b) {
+				groupedStrokes[j] = b.Union(h)
+				continue outer
+			}
 		}
-		mbox, err := tmpPage.GetMediaBox()
-		if err != nil {
-			return nil, err
-		}
+		groupedStrokes = append(groupedStrokes, h)
+	}
 
-		// TODO: adjust the page if cropped
-		pageHeight := mbox.Ury - mbox.Lly
-		pageWidth := mbox.Urx - mbox.Llx
-		// use the pdf's page size
-		c.SetPageSize(creator.PageSize{pageWidth, pageHeight})
-		c.AddPage(tmpPage)
-		page = tmpPage
+	if len(groupedStrokes) != len(list) {
+		return groupHighlights(groupedStrokes)
 	} else {
-		page = c.NewPage()
+		return groupedStrokes
 	}
-
-	if p.options.AddPageNumbers {
-		c.DrawFooter(func(block *creator.Block, args creator.FooterFunctionArgs) {
-			p := c.NewParagraph(fmt.Sprintf("%d", args.PageNum))
-			p.SetFontSize(8)
-			w := block.Width() - 20
-			h := block.Height() - 10
-			p.SetPos(w, h)
-			block.Draw(p)
-		})
-	}
-	return page, nil
 }
